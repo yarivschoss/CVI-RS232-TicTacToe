@@ -19,6 +19,39 @@ static const char *kConnectingTxt[4] = {"Connecting", "Connecting.", "Connecting
 
 /* ---------- helpers ------------------------------------------------- */
 
+static int SafeComWrtByte (int port, unsigned char data)
+{
+	#define kMaxRetries   3
+	#define kRetryDelay   0.010          /* seconds between retries */
+	
+    int status = 0, attempt;
+
+    for (attempt = 0; attempt < kMaxRetries; ++attempt)
+    {
+        status = ComWrtByte (port, data);
+
+        if (status == 1)         /* success: exactly one byte written */
+            return 1;
+
+        Delay (kRetryDelay);     /* brief pause before next try       */
+    }
+
+    /* If we get here every attempt failed â€“ alert the user */
+    {
+        char msg[128];
+        sprintf (msg,
+                 "Failed to transmit on COM%d after %d attempts.\n"
+                 "Please check the cable / peer PC and restart the game.",
+                 port, kMaxRetries);
+
+        /* Blocking popup keeps things simple; replace with PostDeferredCall
+           + message panel if you prefer a non?modal alert from the UI thread */
+        MessagePopup ("Serial write error", msg);
+    }
+
+    return status;               /* propagate last error code (<0) */
+}
+
 /* Try to open COMx, configure to 9600-8-N-1.
    returns 0 on success, negative CVI error otherwise               */
 static inline int TryOpenPort (int port)
@@ -27,7 +60,7 @@ static inline int TryOpenPort (int port)
     sprintf (portName, "COM%d", port);
 
     /* 9600 baud, no parity, 8 data bits, 1 stop bit, 512-byte queues */
-    return OpenComConfig (port, portName, 9600, 0, 8, 1, 512, 512);
+    return OpenComConfig (port, portName, 115200, 0, 8, 1, 512, 512);
 }
 
 static void MarkTraffic (void)         /* call whenever byte RX/TX   */
@@ -38,8 +71,8 @@ static void MarkTraffic (void)         /* call whenever byte RX/TX   */
 static void DecideSymbol (void)
 {
     /* send our port number */
-    ComWrtByte (gPort, 'P');
-    ComWrtByte (gPort, (unsigned char) gPort);
+    SafeComWrtByte (gPort, 'P');
+    SafeComWrtByte (gPort, (unsigned char) gPort);
 
     int remote = -1, stage = 0, to = 200;   /* 1-s timeout */
     while (to-- > 0 && remote < 0)
@@ -56,10 +89,10 @@ static void DecideSymbol (void)
     else
         gMySymbol = (gPort < remote) ? SYMBOL_X : SYMBOL_O;
 
-    gRoleReady = 1;          /* tell UI thread we’re done */
+    gRoleReady = 1;          /* tell UI thread weâ€™re done */
 }
 
-/* Handle inbound traffic – returns 1 if packet complete */
+/* Handle inbound traffic â€“ returns 1 if packet complete */
 static int ProcessIncomingByte (unsigned char ch)
 {
     static unsigned char pkt[3];
@@ -95,7 +128,7 @@ static int ProcessIncomingByte (unsigned char ch)
             pkt[idx++] = ch;            /* reuse existing M parser */
             if (idx < 3) return 0;     /* waiting for row/col     */
             
-         	/* full “row col” ready    */
+         	/* full â€œrow colâ€ ready    */
             int row = pkt[0], col = pkt[1], sym = pkt[2];
 			
             typedef struct { int r,c,s; } Move;
@@ -131,7 +164,7 @@ static void CVICALLBACK ComDisconnectCallback (int port, int eventMask,
                                                void *cbData)
 {
 	/* confirm peer still asserts carrier / DSR ---------------- */
-	int lineBits = GetComLineStatus (port);          /* always safe – no GP fault */
+	int lineBits = GetComLineStatus (port);          /* always safe â€“ no GP fault */
 	int peerAlive =  (lineBits & kRS_DSR_ON)   &&   /* DSR asserted      */
                  (lineBits & kRS_RLSD_ON);      /* Carrier-Detect on */
 	
@@ -177,7 +210,7 @@ static inline int AutoInitComPort (int *resultPort)
     int status = -1;
     int port;
 
-    for (port = 1; port <= 32; ++port)           /* scan COM1…COM32 */
+    for (port = 1; port <= 32; ++port)           /* scan COM1â€¦COM32 */
     {
         status = TryOpenPort (port);
         if (status == 0)                   /* opened successfully?          */
@@ -200,7 +233,7 @@ int ComThread_ForceExit(void)
     }
 	
 	int WorkerReturn = 0; 
-	CmtExitThreadPoolThread (WorkerReturn);
+	CmtDiscardThreadPool (WorkerReturn);
 	return WorkerReturn;
 }
 
@@ -246,15 +279,15 @@ void ComThread_SendMove (int row, int col)
     if (gState != CTS_CONNECTED)      /* link must be up */
         return;
 
-    ComWrtByte (gPort, 'M');                          /* packet header */
-    ComWrtByte (gPort, (unsigned char) row);          /* 0…2            */
-    ComWrtByte (gPort, (unsigned char) col);          /* 0…2            */
+    SafeComWrtByte (gPort, 'M');                          /* packet header */
+    SafeComWrtByte (gPort, (unsigned char) row);          /* 0â€¦2            */
+    SafeComWrtByte (gPort, (unsigned char) col);          /* 0â€¦2            */
 }
 
 /* Returns status of reading (0 - no byte/failed, 1 - read 1 byte). */
 int ComThread_SendByte(char c)
 {
-	int status = ComWrtByte(gPort, c);
+	int status = SafeComWrtByte(gPort, c);
 	MarkTraffic();	
 	return status;
 }
@@ -274,15 +307,15 @@ ConnState GetConnectionState (void)
 }
 
 /* Worker running in background:                                             */
-/*  – does “H/K” handshake                                                   */
+/*  â€“ does â€œH/Kâ€ handshake                                                   */
 static int CVICALLBACK ComWorker (void *data)
 {
 	int dotPhase = 0;                      /* 0-3  */
     gState = CTS_CONNECTING;
 	
-    ComWrtByte (gPort, BYTE_HELLO); /* kick off our own HELLO ? both sides do this once */
+	SafeComWrtByte (gPort, BYTE_HELLO); /* kick off our own HELLO ? both sides do this once */	
 
-    int timeoutTicks = TIMEOUT_TICKS; /* TIMEOUT_TICKS × (5 ms + COM_TIMEOUT) = 15.075 s timeout */
+    int timeoutTicks = TIMEOUT_TICKS; /* TIMEOUT_TICKS Ã— (5 ms + COM_TIMEOUT) = 15.075 s timeout */
     while (timeoutTicks-- > 0 && gState == CTS_CONNECTING)
     {
         int ch = ComRdByte (gPort);
@@ -294,7 +327,7 @@ static int CVICALLBACK ComWorker (void *data)
         }
 
         if (ch == BYTE_HELLO)
-            ComWrtByte (gPort, BYTE_OK);    /* peer's hello ? answer */
+            SafeComWrtByte (gPort, BYTE_OK);    /* peer's hello ? answer */
         else if (ch == BYTE_OK)
             gState = CTS_CONNECTED;         /* handshake done       */
     }
